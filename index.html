@@ -1,0 +1,255 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="Escáner">
+<title>Escáner de códigos</title>
+<style>
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body { margin: 0; padding: 0; height: 100%; font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; background: #f3f4f6; color: #111827; touch-action: manipulation; }
+  body { display: flex; flex-direction: column; min-height: 100vh; }
+  header { background: #1f2937; color: #fff; padding: 14px 16px; font-size: 20px; font-weight: 700; text-align: center; }
+  main { padding: 12px; display: flex; flex-direction: column; gap: 12px; flex: 1; }
+  .seg { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+  .seg button { font-size: 20px; padding: 18px; border-radius: 14px; border: 2px solid #9ca3af; background: #fff; font-weight: 700; }
+  .seg button.on { background: #2563eb; border-color: #2563eb; color: #fff; }
+  .btn { font-size: 22px; padding: 18px; border: none; border-radius: 14px; background: #16a34a; color: #fff; font-weight: 700; width: 100%; }
+  .btn.sec { background: #4b5563; }
+  .btn:disabled { opacity: .5; }
+  #camWrap { position: relative; width: 100%; background: #000; border-radius: 14px; overflow: hidden; display: none; aspect-ratio: 3 / 4; }
+  #cam { width: 100%; height: 100%; object-fit: cover; }
+  #camWrap .hint { position: absolute; bottom: 8px; left: 0; right: 0; text-align: center; color: #fff; background: rgba(0,0,0,.5); padding: 6px; font-size: 16px; }
+  label { font-size: 17px; font-weight: 600; display: block; margin-bottom: 4px; }
+  input, textarea { width: 100%; font-size: 20px; padding: 14px; border: 2px solid #d1d5db; border-radius: 12px; background: #fff; }
+  textarea { min-height: 80px; resize: vertical; }
+  .field { display: flex; flex-direction: column; }
+  #msg { font-size: 18px; text-align: center; padding: 12px; border-radius: 12px; display: none; }
+  #msg.ok { display: block; background: #dcfce7; color: #166534; }
+  #msg.err { display: block; background: #fee2e2; color: #991b1b; }
+  #msg.info { display: block; background: #e0e7ff; color: #3730a3; }
+</style>
+</head>
+<body>
+<header>Escáner de códigos</header>
+<main>
+
+  <div class="seg" id="tipoSeg">
+    <button type="button" data-tipo="Bodega" class="on">Bodega</button>
+    <button type="button" data-tipo="Medidor">Medidor</button>
+  </div>
+
+  <button type="button" id="btnScan" class="btn sec">📷 Escanear código</button>
+
+  <div id="camWrap">
+    <video id="cam" playsinline muted autoplay></video>
+    <div class="hint">Apunta la cámara al código</div>
+  </div>
+  <button type="button" id="btnStop" class="btn sec" style="display:none">Cerrar cámara</button>
+
+  <div class="field">
+    <label for="codigo">Código</label>
+    <input id="codigo" inputmode="numeric" autocomplete="off" placeholder="Código de barras">
+  </div>
+
+  <div class="field" id="campoCantidad">
+    <label for="cantidad">Cantidad</label>
+    <input id="cantidad" type="number" inputmode="decimal" min="0" step="any" placeholder="0">
+  </div>
+
+  <div class="field" id="campoLectura" style="display:none">
+    <label for="lectura">Lectura</label>
+    <input id="lectura" type="number" inputmode="decimal" step="any" placeholder="0.00">
+  </div>
+
+  <div class="field">
+    <label for="usuario">Usuario</label>
+    <input id="usuario" autocomplete="off" placeholder="Tu nombre">
+  </div>
+
+  <div class="field">
+    <label for="notas">Notas</label>
+    <textarea id="notas" placeholder="Observaciones (opcional)"></textarea>
+  </div>
+
+  <button type="button" id="btnGuardar" class="btn">💾 Guardar</button>
+  <div id="msg"></div>
+</main>
+
+<script src="https://cdn.jsdelivr.net/npm/@zxing/library@0.21.3/umd/index.min.js"></script>
+<script>
+(function () {
+  // ===== CONFIGURACIÓN =====
+  const URL_APPS_SCRIPT = 'https://script.google.com/macros/s/AKfycbxwMHvMzOD568HivJ0zTmKF6Wg3btNl3jpX_54dbVPX8aP6FIvmekKKLOFxEfMk9lhmKA/exec';
+  const TOKEN = 'MI-TOKEN';
+  const HOJA = 'Escaneos';
+
+  const $ = id => document.getElementById(id);
+  let tipo = 'Bodega';
+  let stream = null, detector = null, zxingReader = null, scanning = false, rafId = null;
+
+  function msg(texto, clase) {
+    const m = $('msg');
+    m.textContent = texto;
+    m.className = clase;
+  }
+
+  // ----- Selector Tipo -----
+  document.querySelectorAll('#tipoSeg button').forEach(b => {
+    b.addEventListener('click', () => {
+      tipo = b.dataset.tipo;
+      document.querySelectorAll('#tipoSeg button').forEach(x => x.classList.toggle('on', x === b));
+      $('campoCantidad').style.display = tipo === 'Bodega' ? '' : 'none';
+      $('campoLectura').style.display = tipo === 'Medidor' ? '' : 'none';
+    });
+  });
+
+  // ----- Cámara -----
+  async function abrirCamara() {
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+      msg('Este navegador no permite usar la cámara. Usa HTTPS.', 'err');
+      return;
+    }
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({
+        video: { facingMode: { ideal: 'environment' }, width: { ideal: 1280 }, height: { ideal: 720 } },
+        audio: false
+      });
+    } catch (e) {
+      msg('No se pudo abrir la cámara. Revisa los permisos.', 'err');
+      return;
+    }
+    const video = $('cam');
+    video.setAttribute('playsinline', '');
+    video.srcObject = stream;
+    await video.play();
+    $('camWrap').style.display = 'block';
+    $('btnStop').style.display = 'block';
+    $('btnScan').style.display = 'none';
+    scanning = true;
+    iniciarDeteccion();
+  }
+
+  function cerrarCamara() {
+    scanning = false;
+    if (rafId) cancelAnimationFrame(rafId);
+    if (zxingReader && zxingReader.reset) { try { zxingReader.reset(); } catch (e) {} }
+    if (stream) stream.getTracks().forEach(t => t.stop());
+    stream = null;
+    $('cam').srcObject = null;
+    $('camWrap').style.display = 'none';
+    $('btnStop').style.display = 'none';
+    $('btnScan').style.display = 'block';
+  }
+
+  function codigoEncontrado(valor, formato) {
+    $('codigo').value = valor;
+    msg('Código leído: ' + valor + ' (' + formato + ')', 'info');
+    cerrarCamara();
+    if (navigator.vibrate) navigator.vibrate(150);
+  }
+
+  function iniciarDeteccion() {
+    // Android / Chrome: BarcodeDetector nativo
+    if ('BarcodeDetector' in window) {
+      try {
+        detector = new BarcodeDetector({ formats: ['ean_13', 'code_128'] });
+        const video = $('cam');
+        const loop = async () => {
+          if (!scanning) return;
+          try {
+            const codes = await detector.detect(video);
+            if (codes.length) {
+              codigoEncontrado(codes[0].rawValue, codes[0].format);
+              return;
+            }
+          } catch (e) { /* frame aún no listo */ }
+          rafId = requestAnimationFrame(loop);
+        };
+        loop();
+        return;
+      } catch (e) { /* cae a ZXing */ }
+    }
+    // iPhone / Safari u otros: ZXing
+    usarZXing();
+  }
+
+  function usarZXing() {
+    if (!window.ZXing) {
+      msg('No se pudo cargar el lector de códigos. Revisa tu conexión.', 'err');
+      cerrarCamara();
+      return;
+    }
+    const hints = new Map();
+    hints.set(ZXing.DecodeHintType.POSSIBLE_FORMATS, [
+      ZXing.BarcodeFormat.EAN_13,
+      ZXing.BarcodeFormat.CODE_128
+    ]);
+    zxingReader = new ZXing.BrowserMultiFormatReader(hints);
+    zxingReader.decodeFromVideoElement('cam', (result, err) => {
+      if (!scanning) return;
+      if (result) {
+        codigoEncontrado(result.getText(), String(result.getBarcodeFormat()));
+      }
+    }).catch(() => msg('No se pudo iniciar el lector.', 'err'));
+  }
+
+  $('btnScan').addEventListener('click', abrirCamara);
+  $('btnStop').addEventListener('click', cerrarCamara);
+
+  // ----- Guardar -----
+  $('btnGuardar').addEventListener('click', async () => {
+    const codigo = $('codigo').value.trim();
+    const cantidad = tipo === 'Bodega' ? $('cantidad').value.trim() : $('lectura').value.trim();
+    const usuario = $('usuario').value.trim();
+    const notas = $('notas').value.trim();
+
+    if (!codigo) { msg('Escribe o escanea el código.', 'err'); return; }
+    if (!cantidad) { msg(tipo === 'Bodega' ? 'Escribe la cantidad.' : 'Escribe la lectura.', 'err'); return; }
+    if (!usuario) { msg('Escribe el usuario.', 'err'); return; }
+
+    const formato = detectarFormato(codigo);
+    const payload = {
+      token: TOKEN,
+      hoja: HOJA,
+      fecha: new Date().toISOString(),
+      tipo: tipo,
+      codigo: codigo,
+      formato: formato,
+      cantidad: cantidad,
+      usuario: usuario,
+      notas: notas
+    };
+
+    const btn = $('btnGuardar');
+    btn.disabled = true;
+    msg('Guardando…', 'info');
+    try {
+      // no-cors: Apps Script no permite leer la respuesta desde otro dominio.
+      await fetch(URL_APPS_SCRIPT, {
+        method: 'POST',
+        mode: 'no-cors',
+        headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+        body: JSON.stringify(payload)
+      });
+      msg('Guardado. Listo para el siguiente.', 'ok');
+      $('codigo').value = '';
+      $('cantidad').value = '';
+      $('lectura').value = '';
+      $('notas').value = '';
+    } catch (e) {
+      msg('Error al guardar. Revisa tu conexión e inténtalo de nuevo.', 'err');
+    } finally {
+      btn.disabled = false;
+    }
+  });
+
+  function detectarFormato(codigo) {
+    if (/^\d{13}$/.test(codigo)) return 'EAN-13';
+    return 'Code 128';
+  }
+})();
+</script>
+</body>
+</html>
