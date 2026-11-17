@@ -15,7 +15,7 @@
   .seg { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
   .seg button { font-size: 20px; padding: 18px; border-radius: 14px; border: 2px solid #9ca3af; background: #fff; font-weight: 700; }
   .seg button.on { background: #2563eb; border-color: #2563eb; color: #fff; }
-  .btn { font-size: 22px; padding: 18px; border: none; border-radius: 14px; background: #16a34a; color: #fff; font-weight: 700; width: 100%; }
+  .btn { font-size: 22px; padding: 18px; border: none; border-radius: 14px; background: #16a34a; color: #fff; font-weight: 700; width: 100%; display: block; text-align: center; }
   .btn.sec { background: #4b5563; }
   .btn:disabled { opacity: .5; }
   #camWrap { position: relative; width: 100%; background: #000; border-radius: 14px; overflow: hidden; display: none; aspect-ratio: 3 / 4; }
@@ -40,8 +40,9 @@
     <button type="button" data-tipo="Medidor">Medidor</button>
   </div>
 
-  <button type="button" id="btnScan" class="btn sec">📷 Escanear código</button>
-  <label class="btn sec" style="display:block;text-align:center;cursor:pointer">📸 Tomar foto del código
+  <button type="button" id="btnScan" class="btn sec">📷 Escanear código de barras</button>
+  <button type="button" id="btnQR" class="btn sec">🔳 Escanear QR</button>
+  <label class="btn sec" style="cursor:pointer">📸 Tomar foto del código
     <input id="foto" type="file" accept="image/*" capture="environment" style="display:none">
   </label>
 
@@ -53,7 +54,7 @@
 
   <div class="field">
     <label for="codigo">Código</label>
-    <input id="codigo" inputmode="numeric" autocomplete="off" placeholder="Código de barras">
+    <input id="codigo" autocomplete="off" placeholder="Código de barras o QR">
   </div>
 
   <div class="field" id="campoCantidad">
@@ -91,6 +92,8 @@
   const $ = id => document.getElementById(id);
   let tipo = 'Bodega';
   let stream = null, detector = null, zxingReader = null, scanning = false, rafId = null;
+  let modo = 'barras';     // 'barras' (EAN-13 / Code 128) o 'qr'
+  let ultimoLeido = null;  // { valor, formato } del último código leído
 
   function msg(texto, clase) {
     const m = $('msg');
@@ -108,8 +111,23 @@
     });
   });
 
+  // ----- Formatos según el botón usado -----
+  function formatosBD() {
+    return modo === 'qr' ? ['qr_code'] : ['ean_13', 'code_128'];
+  }
+  function formatosZX() {
+    return modo === 'qr'
+      ? [ZXing.BarcodeFormat.QR_CODE]
+      : [ZXing.BarcodeFormat.EAN_13, ZXing.BarcodeFormat.CODE_128];
+  }
+  function nombreFormato(valor, formatoBruto) {
+    if (modo === 'qr' || formatoBruto === 'qr_code' || formatoBruto === 'QR_CODE') return 'QR';
+    return detectarFormato(valor);
+  }
+
   // ----- Cámara en vivo -----
-  async function abrirCamara() {
+  async function abrirCamara(m) {
+    modo = m || 'barras';
     if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
       msg('Este navegador no permite usar la cámara. Usa "Tomar foto del código".', 'err');
       return;
@@ -131,8 +149,9 @@
     $('camWrap').style.display = 'block';
     $('btnStop').style.display = 'block';
     $('btnScan').style.display = 'none';
+    $('btnQR').style.display = 'none';
     scanning = true;
-    msg('Buscando código… acerca el código y con buena luz.', 'info');
+    msg(modo === 'qr' ? 'Buscando QR… acércalo con buena luz.' : 'Buscando código… acerca el código y con buena luz.', 'info');
     iniciarDeteccion();
   }
 
@@ -146,10 +165,12 @@
     $('camWrap').style.display = 'none';
     $('btnStop').style.display = 'none';
     $('btnScan').style.display = 'block';
+    $('btnQR').style.display = 'block';
   }
 
   function codigoEncontrado(valor, formato) {
     $('codigo').value = valor;
+    ultimoLeido = { valor: valor, formato: formato };
     msg('Código leído: ' + valor + ' (' + formato + ')', 'info');
     cerrarCamara();
     if (navigator.vibrate) navigator.vibrate(150);
@@ -159,14 +180,14 @@
     // Android / Chrome: BarcodeDetector nativo
     if ('BarcodeDetector' in window) {
       try {
-        detector = new BarcodeDetector({ formats: ['ean_13', 'code_128'] });
+        detector = new BarcodeDetector({ formats: formatosBD() });
         const video = $('cam');
         const loop = async () => {
           if (!scanning) return;
           try {
             const codes = await detector.detect(video);
             if (codes.length) {
-              codigoEncontrado(codes[0].rawValue, codes[0].format);
+              codigoEncontrado(codes[0].rawValue, nombreFormato(codes[0].rawValue, codes[0].format));
               return;
             }
           } catch (e) { /* frame aún no listo */ }
@@ -176,7 +197,7 @@
         return;
       } catch (e) { /* cae a ZXing */ }
     }
-    // iPhone / Safari u otros: ZXing
+    // iPhone / Safari u otros: ZXing (lee EAN-13, Code 128 y QR)
     usarZXing();
   }
 
@@ -187,21 +208,19 @@
       return;
     }
     const hints = new Map();
-    hints.set(ZXing.DecodeHintType.POSSIBLE_FORMATS, [
-      ZXing.BarcodeFormat.EAN_13,
-      ZXing.BarcodeFormat.CODE_128
-    ]);
+    hints.set(ZXing.DecodeHintType.POSSIBLE_FORMATS, formatosZX());
     hints.set(ZXing.DecodeHintType.TRY_HARDER, true);
     zxingReader = new ZXing.BrowserMultiFormatReader(hints);
     zxingReader.decodeFromVideoElement('cam', (result, err) => {
       if (!scanning) return;
       if (result) {
-        codigoEncontrado(result.getText(), detectarFormato(result.getText()));
+        codigoEncontrado(result.getText(), nombreFormato(result.getText(), String(result.getBarcodeFormat())));
       }
     }).catch(() => msg('No se pudo iniciar el lector. Usa "Tomar foto del código".', 'err'));
   }
 
-  $('btnScan').addEventListener('click', abrirCamara);
+  $('btnScan').addEventListener('click', () => abrirCamara('barras'));
+  $('btnQR').addEventListener('click', () => abrirCamara('qr'));
   $('btnStop').addEventListener('click', cerrarCamara);
 
   // ----- Leer código desde una foto (fallback fiable en iPhone) -----
@@ -214,11 +233,11 @@
     const url = URL.createObjectURL(file);
     try {
       const hints = new Map();
-      hints.set(ZXing.DecodeHintType.POSSIBLE_FORMATS, [ZXing.BarcodeFormat.EAN_13, ZXing.BarcodeFormat.CODE_128]);
+      hints.set(ZXing.DecodeHintType.POSSIBLE_FORMATS, formatosZX());
       hints.set(ZXing.DecodeHintType.TRY_HARDER, true);
       const reader = new ZXing.BrowserMultiFormatReader(hints);
       const r = await reader.decodeFromImageUrl(url);
-      codigoEncontrado(r.getText(), detectarFormato(r.getText()));
+      codigoEncontrado(r.getText(), nombreFormato(r.getText(), String(r.getBarcodeFormat())));
     } catch (e) {
       msg('No se encontró ningún código en la foto. Acércate, enfoca bien y con buena luz, y vuelve a intentarlo.', 'err');
     } finally {
@@ -237,7 +256,11 @@
     if (!cantidad) { msg(tipo === 'Bodega' ? 'Escribe la cantidad.' : 'Escribe la lectura.', 'err'); return; }
     if (!usuario) { msg('Escribe el usuario.', 'err'); return; }
 
-    const formato = detectarFormato(codigo);
+    // Si el código vino de un escaneo, usamos el formato detectado; si se escribió a mano, lo deducimos.
+    const formato = (ultimoLeido && ultimoLeido.valor === codigo)
+      ? ultimoLeido.formato
+      : detectarFormato(codigo);
+
     const payload = {
       token: TOKEN,
       hoja: HOJA,
@@ -269,6 +292,7 @@
       $('cantidad').value = '';
       $('lectura').value = '';
       $('notas').value = '';
+      ultimoLeido = null;
     } catch (e) {
       msg('Error al guardar. Revisa tu conexión e inténtalo de nuevo.', 'err');
     } finally {
