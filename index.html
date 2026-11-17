@@ -82,6 +82,8 @@
 </main>
 
 <script src="https://cdn.jsdelivr.net/npm/@zxing/library@0.21.3/umd/index.min.js"></script>
+<!-- Polyfill de BarcodeDetector basado en zxing-wasm: da soporte de BarcodeDetector en iPhone (Safari) -->
+<script src="https://cdn.jsdelivr.net/npm/barcode-detector@3.2.4/dist/iife/polyfill.js"></script>
 <script>
 (function () {
   // ===== CONFIGURACIÓN =====
@@ -176,12 +178,13 @@
     if (navigator.vibrate) navigator.vibrate(150);
   }
 
+  // BarcodeDetector nativo (Android/Chrome) o polyfill zxing-wasm (iPhone/Safari)
   function iniciarDeteccion() {
-    // Android / Chrome: BarcodeDetector nativo
     if ('BarcodeDetector' in window) {
       try {
         detector = new BarcodeDetector({ formats: formatosBD() });
         const video = $('cam');
+        let errores = 0;
         const loop = async () => {
           if (!scanning) return;
           try {
@@ -190,14 +193,16 @@
               codigoEncontrado(codes[0].rawValue, nombreFormato(codes[0].rawValue, codes[0].format));
               return;
             }
-          } catch (e) { /* frame aún no listo */ }
+          } catch (e) {
+            errores++;
+            if (errores > 30) { usarZXing(); return; } // si el detector falla de forma continua, usar ZXing
+          }
           rafId = requestAnimationFrame(loop);
         };
         loop();
         return;
       } catch (e) { /* cae a ZXing */ }
     }
-    // iPhone / Safari u otros: ZXing (lee EAN-13, Code 128 y QR)
     usarZXing();
   }
 
@@ -223,7 +228,7 @@
   $('btnQR').addEventListener('click', () => abrirCamara('qr'));
   $('btnStop').addEventListener('click', cerrarCamara);
 
-  // ----- Leer código desde una foto (fallback fiable en iPhone) -----
+  // ----- Leer código desde una foto (fallback) -----
   $('foto').addEventListener('change', async (ev) => {
     const file = ev.target.files && ev.target.files[0];
     ev.target.value = '';
@@ -256,7 +261,6 @@
     if (!cantidad) { msg(tipo === 'Bodega' ? 'Escribe la cantidad.' : 'Escribe la lectura.', 'err'); return; }
     if (!usuario) { msg('Escribe el usuario.', 'err'); return; }
 
-    // Si el código vino de un escaneo, usamos el formato detectado; si se escribió a mano, lo deducimos.
     const formato = (ultimoLeido && ultimoLeido.valor === codigo)
       ? ultimoLeido.formato
       : detectarFormato(codigo);
@@ -278,8 +282,7 @@
     msg('Guardando…', 'info');
     try {
       // no-cors: Apps Script no permite leer la respuesta desde otro dominio.
-      // Esperamos como máximo 4 s; si no responde, damos el envío por hecho
-      // (la fila suele guardarse igual) para no dejar el botón bloqueado.
+      // Esperamos como máximo 4 s; si no responde, damos el envío por hecho.
       const envio = fetch(URL_APPS_SCRIPT, {
         method: 'POST',
         mode: 'no-cors',
