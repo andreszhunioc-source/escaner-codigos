@@ -41,6 +41,9 @@
   </div>
 
   <button type="button" id="btnScan" class="btn sec">📷 Escanear código</button>
+  <label class="btn sec" style="display:block;text-align:center;cursor:pointer">📸 Tomar foto del código
+    <input id="foto" type="file" accept="image/*" capture="environment" style="display:none">
+  </label>
 
   <div id="camWrap">
     <video id="cam" playsinline muted autoplay></video>
@@ -105,29 +108,31 @@
     });
   });
 
-  // ----- Cámara -----
+  // ----- Cámara en vivo -----
   async function abrirCamara() {
     if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-      msg('Este navegador no permite usar la cámara. Usa HTTPS.', 'err');
+      msg('Este navegador no permite usar la cámara. Usa "Tomar foto del código".', 'err');
       return;
     }
     try {
       stream = await navigator.mediaDevices.getUserMedia({
-        video: { facingMode: { ideal: 'environment' }, width: { ideal: 1280 }, height: { ideal: 720 } },
+        video: { facingMode: { ideal: 'environment' }, width: { ideal: 1920 }, height: { ideal: 1080 } },
         audio: false
       });
     } catch (e) {
-      msg('No se pudo abrir la cámara. Revisa los permisos.', 'err');
+      msg('No se pudo abrir la cámara. Revisa los permisos o usa "Tomar foto del código".', 'err');
       return;
     }
     const video = $('cam');
     video.setAttribute('playsinline', '');
+    video.setAttribute('muted', '');
     video.srcObject = stream;
-    await video.play();
+    try { await video.play(); } catch (e) { /* iOS puede requerir otro toque */ }
     $('camWrap').style.display = 'block';
     $('btnStop').style.display = 'block';
     $('btnScan').style.display = 'none';
     scanning = true;
+    msg('Buscando código… acerca el código y con buena luz.', 'info');
     iniciarDeteccion();
   }
 
@@ -177,7 +182,7 @@
 
   function usarZXing() {
     if (!window.ZXing) {
-      msg('No se pudo cargar el lector de códigos. Revisa tu conexión.', 'err');
+      msg('No se pudo cargar el lector de códigos. Revisa tu conexión o usa "Tomar foto del código".', 'err');
       cerrarCamara();
       return;
     }
@@ -186,17 +191,40 @@
       ZXing.BarcodeFormat.EAN_13,
       ZXing.BarcodeFormat.CODE_128
     ]);
+    hints.set(ZXing.DecodeHintType.TRY_HARDER, true);
     zxingReader = new ZXing.BrowserMultiFormatReader(hints);
     zxingReader.decodeFromVideoElement('cam', (result, err) => {
       if (!scanning) return;
       if (result) {
-        codigoEncontrado(result.getText(), String(result.getBarcodeFormat()));
+        codigoEncontrado(result.getText(), detectarFormato(result.getText()));
       }
-    }).catch(() => msg('No se pudo iniciar el lector.', 'err'));
+    }).catch(() => msg('No se pudo iniciar el lector. Usa "Tomar foto del código".', 'err'));
   }
 
   $('btnScan').addEventListener('click', abrirCamara);
   $('btnStop').addEventListener('click', cerrarCamara);
+
+  // ----- Leer código desde una foto (fallback fiable en iPhone) -----
+  $('foto').addEventListener('change', async (ev) => {
+    const file = ev.target.files && ev.target.files[0];
+    ev.target.value = '';
+    if (!file) return;
+    if (!window.ZXing) { msg('No se pudo cargar el lector de códigos. Revisa tu conexión.', 'err'); return; }
+    msg('Leyendo la foto…', 'info');
+    const url = URL.createObjectURL(file);
+    try {
+      const hints = new Map();
+      hints.set(ZXing.DecodeHintType.POSSIBLE_FORMATS, [ZXing.BarcodeFormat.EAN_13, ZXing.BarcodeFormat.CODE_128]);
+      hints.set(ZXing.DecodeHintType.TRY_HARDER, true);
+      const reader = new ZXing.BrowserMultiFormatReader(hints);
+      const r = await reader.decodeFromImageUrl(url);
+      codigoEncontrado(r.getText(), detectarFormato(r.getText()));
+    } catch (e) {
+      msg('No se encontró ningún código en la foto. Acércate, enfoca bien y con buena luz, y vuelve a intentarlo.', 'err');
+    } finally {
+      URL.revokeObjectURL(url);
+    }
+  });
 
   // ----- Guardar -----
   $('btnGuardar').addEventListener('click', async () => {
